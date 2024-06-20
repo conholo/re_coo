@@ -145,11 +145,12 @@ void VulkanFramebuffer::CreateFramebuffer()
         subpassDescs[i].pipelineBindPoint = m_Subpasses[i].BindPoint;
         subpassDescs[i].colorAttachmentCount = static_cast<uint32_t>(m_Subpasses[i].ColorAttachments.size());
         subpassDescs[i].pColorAttachments = m_Subpasses[i].ColorAttachments.data();
-        subpassDescs[i].pDepthStencilAttachment =
-                m_Subpasses[i].DepthStencilAttachment.attachment != VK_ATTACHMENT_UNUSED
-                ? &m_Subpasses[i].DepthStencilAttachment
-                : nullptr;
-    }
+        subpassDescs[i].inputAttachmentCount = static_cast<uint32_t>(m_Subpasses[i].InputAttachments.size());
+        subpassDescs[i].pInputAttachments = m_Subpasses[i].InputAttachments.data();
+        subpassDescs[i].pDepthStencilAttachment = m_Subpasses[i].DepthStencilAttachment.attachment != VK_ATTACHMENT_UNUSED
+                    ? &m_Subpasses[i].DepthStencilAttachment
+                    : nullptr;
+        }
 
     std::vector<VkSubpassDependency> dependencies(m_Dependencies.size());
     for (size_t i = 0; i < m_Dependencies.size(); ++i)

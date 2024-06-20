@@ -11,7 +11,8 @@ layout(set = 0, binding = 0) uniform GlobalUBO
     mat4 InvView;
     mat4 InvProjection;
     vec4 CameraPosition;
-} u_UBO;
+    ivec4 ScreenResolution_NumRaysPerPixel_FrameNumber;
+}  u_UBO;
 
 void main()
 {

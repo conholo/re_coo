@@ -32,7 +32,7 @@ void Application::Run()
         currentTime = newTime;
 
         m_Camera.Tick(frameTime);
-        renderer.Render(m_Camera);
+        renderer.Draw(m_Camera);
     }
 
     vkDeviceWaitIdle(m_VulkanDevice.GetDevice());

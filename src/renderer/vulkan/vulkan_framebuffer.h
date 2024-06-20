@@ -25,6 +25,7 @@ public:
     {
         std::vector<VkAttachmentReference> ColorAttachments;
         VkAttachmentReference DepthStencilAttachment;
+        std::vector<VkAttachmentReference> InputAttachments;
         VkPipelineBindPoint BindPoint;
     };
 

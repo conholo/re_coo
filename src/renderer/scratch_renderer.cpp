@@ -1,6 +1,7 @@
 #include "scratch_renderer.h"
 #include "renderer/vulkan/vulkan_utils.h"
 #include "core/frame_info.h"
+#include "scene/scene.h"
 
 #include <sstream>
 
@@ -15,8 +16,158 @@ RTRenderer::~RTRenderer()
 
 }
 
+void RTRenderer::CreateSphereBuffers()
+{
+    Sphere sphereA
+    {
+        .Position_Radius{-2.0f, 1.0f, 0.0f, 1.0f},
+        .Material
+                {
+                        .Color_Smoothness{0.9f, 0.0f, 0.1f, 0.0f},
+                        .EmissionColor_Strength{0.0f, 0.0f, 0.0f, 0.0f},
+                        .SpecularColor_Probability{1.0f, 1.0f, 1.0f, 0.5f},
+                }
+    };
+    Sphere sphereB
+    {
+        .Position_Radius{2.5f, 1.0f, 0.0f, 2.0f},
+        .Material
+                {
+                        .Color_Smoothness{0.1f, 0.8f, 0.1f, 1.0f},
+                        .EmissionColor_Strength{0.0f, 0.0f, 0.0f, 0.0f},
+                        .SpecularColor_Probability{1.0f, 1.0f, 1.0f, 0.9f},
+                }
+    };
+    Sphere emissiveSphereA
+    {
+        .Position_Radius{0.0f, 5.0f, 0.0f, 0.5f},
+        .Material
+                {
+                        .Color_Smoothness{0.0f, 0.0f, 0.0f, 0.0f},
+                        .EmissionColor_Strength{1.0f, 1.0f, 1.0f, 1.0f},
+                        .SpecularColor_Probability{0.0f, 0.0f, 0.0f, 0.0f},
+                }
+    };
+
+    std::vector<Sphere> spheres { sphereA, sphereB, emissiveSphereA };
+    uint32_t sphereCount = spheres.size();
+
+    VulkanBuffer stagingBuffer {
+            m_DeviceRef,
+            sizeof(Sphere),
+            sphereCount,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    };
+
+    stagingBuffer.Map();
+    stagingBuffer.WriteToBuffer(spheres.data());
+
+    m_SphereSSBOs.resize(VulkanSwapchain::MAX_FRAMES_IN_FLIGHT);
+
+    // Copy sphere data to all storage buffers
+    for (size_t i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        m_SphereSSBOs[i] = std::make_unique<VulkanBuffer>(
+                m_DeviceRef,
+                sizeof(Sphere),
+                spheres.size(),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        m_DeviceRef.CopyBuffer(stagingBuffer.GetBuffer(), m_SphereSSBOs[i]->GetBuffer(), stagingBuffer.GetBufferSize());
+    }
+}
+
+void RTRenderer::RecordFrame(int swapImageIndex, VkDescriptorSet globalSet)
+{
+    // If the frame is even, the previous fbo is at index 1.
+    int prevIndex = m_FrameCounter % 2 == 0 ? 1 : 0;
+    int currIndex = m_FrameCounter % 2 == 0 ? 0 : 1;
+    VulkanFramebuffer& prevFbo = *m_PerFrameFramebufferMap[swapImageIndex][prevIndex];
+    VulkanFramebuffer& currFbo = *m_PerFrameFramebufferMap[swapImageIndex][currIndex];
+    VkCommandBuffer cmdBuffer = m_DrawCommandBuffers[swapImageIndex];
+
+    // Begin recording the offscreen command buffer
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+    std::array<VkClearValue, 2> clearValues{};
+    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clearValues[1].depthStencil = {1.0f, 0};
+
+    VkRenderPassBeginInfo renderPassBeginInfo{};
+    renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassBeginInfo.renderPass = currFbo.GetRenderPass();
+    renderPassBeginInfo.framebuffer = currFbo.GetFramebuffer();
+    renderPassBeginInfo.renderArea.extent.width = currFbo.GetWidth();
+    renderPassBeginInfo.renderArea.extent.height = currFbo.GetHeight();
+    renderPassBeginInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    renderPassBeginInfo.pClearValues = clearValues.data();
+
+    VK_CHECK_RESULT(vkBeginCommandBuffer(cmdBuffer, &beginInfo));
+
+    vkCmdBeginRenderPass(cmdBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(currFbo.GetWidth());
+    viewport.height = static_cast<float>(currFbo.GetHeight());
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    VkRect2D scissor{{0, 0}, renderPassBeginInfo.renderArea.extent};
+    vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
+    vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+
+    {
+        VkDescriptorSet mainSet = m_MainRTPassDescriptorSets[swapImageIndex];
+        RecordMainRTPass(
+                cmdBuffer,
+                globalSet,
+                mainSet);
+    }
+
+    {
+        vkCmdNextSubpass(cmdBuffer, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkDescriptorSet accumulationSet;
+        auto bufferInfo = m_GlobalUBOs[swapImageIndex]->DescriptorInfo();
+        VkDescriptorImageInfo curr = currFbo.GetDescriptorImageInfoForAttachment(0, m_FramebufferColorSampler);
+        VkDescriptorImageInfo prev = prevFbo.GetDescriptorImageInfoForAttachment(1, m_FramebufferColorSampler);
+        VulkanDescriptorWriter(*m_AccumulationDescriptorSetLayout, *m_DescriptorPool)
+                .WriteBuffer(0, &bufferInfo)
+                .WriteImage(1, &curr)
+                .WriteImage(2, &prev)
+                .Build(accumulationSet);
+
+        RecordAccumulationPass(
+                cmdBuffer,
+                globalSet,
+                accumulationSet);
+    }
+
+    {
+        vkCmdNextSubpass(cmdBuffer, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkDescriptorSet compositionSet;
+        VkDescriptorImageInfo accumulatedAttachment = currFbo.GetDescriptorImageInfoForAttachment(1, m_FramebufferColorSampler);
+        VulkanDescriptorWriter(*m_CompositeDescriptorSetLayout, *m_DescriptorPool)
+                .WriteImage(0, &accumulatedAttachment)
+                .Build(compositionSet);
+
+        RecordCompositionPass(
+                cmdBuffer,
+                compositionSet,
+                currFbo);
+    }
+
+    vkCmdEndRenderPass(cmdBuffer);
+    VK_CHECK_RESULT(vkEndCommandBuffer(cmdBuffer));
+}
+
 void RTRenderer::Initialize()
 {
+    CreateSphereBuffers();
     RecreateSwapchain();
     CreateFramebuffers();
     AllocateCommandBuffers();
@@ -25,95 +176,11 @@ void RTRenderer::Initialize()
 
     SetupMainRayTracePass();
     SetupAccumulationPass();
+    SetupCompositionPass();
 
-    for(int i = 0; i < m_DrawCommandBuffers.size(); i++)
+    for(int i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; i++)
     {
-        VkDescriptorSet globalSet = m_GlobalDescriptorSets[i];
-        VulkanFramebuffer& fbo = *m_Framebuffers[i];
-
-        for(int frameIndex = 0; frameIndex < 2; frameIndex++)
-        {
-            VkCommandBuffer cmdBuffer = m_DrawCommandBuffers[i][frameIndex];
-
-            // Begin recording the offscreen command buffer
-            VkCommandBufferBeginInfo beginInfo{};
-            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-            std::array<VkClearValue, 2> clearValues{};
-            clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-            clearValues[1].depthStencil = {1.0f, 0};
-
-            VkRenderPassBeginInfo renderPassBeginInfo{};
-            renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            renderPassBeginInfo.renderPass = fbo.GetRenderPass();
-            renderPassBeginInfo.framebuffer = fbo.GetFramebuffer();
-            renderPassBeginInfo.renderArea.extent.width = fbo.GetWidth();
-            renderPassBeginInfo.renderArea.extent.height = fbo.GetHeight();
-            renderPassBeginInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-            renderPassBeginInfo.pClearValues = clearValues.data();
-
-            VK_CHECK_RESULT(vkBeginCommandBuffer(cmdBuffer, &beginInfo));
-
-            vkCmdBeginRenderPass(cmdBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = static_cast<float>(fbo.GetWidth());
-            viewport.height = static_cast<float>(fbo.GetHeight());
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            VkRect2D scissor{{0, 0}, renderPassBeginInfo.renderArea.extent};
-            vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
-            vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
-
-            {
-                VkDescriptorSet mainSet = m_MainRTPassDescriptorSets[i];
-                RecordMainRTPass(
-                        cmdBuffer,
-                        globalSet,
-                        mainSet);
-            }
-
-            {
-                VkDescriptorSet accumulationSet = m_AccumulationDescriptorSets[i][frameIndex];
-                VkDescriptorImageInfo curr = fbo.GetDescriptorImageInfoForAttachment(0, m_FramebufferColorSampler);
-                // If the frame is even, attachment at index 1 will be the previous frame's output.
-                int prevIndex = frameIndex == 0 ? 1 : 2;
-                VkDescriptorImageInfo prev = fbo.GetDescriptorImageInfoForAttachment(prevIndex, m_FramebufferColorSampler);
-                VulkanDescriptorWriter(*m_AccumulationDescriptorSetLayout, *m_DescriptorPool)
-                        .WriteImage(0, &curr)
-                        .WriteImage(1, &prev)
-                        .Build(accumulationSet);
-
-                VulkanGraphicsPipeline &pipeline = *m_AccumulationPipelines[frameIndex];
-                RecordAccumulationPass(
-                        cmdBuffer,
-                        pipeline,
-                        globalSet,
-                        accumulationSet);
-            }
-
-            vkCmdEndRenderPass(cmdBuffer);
-            VK_CHECK_RESULT(vkEndCommandBuffer(cmdBuffer));
-
-            {
-                VkFramebuffer swapchainFbo = m_Swapchain->GetFrameBuffer(i);
-                // If the frame is even, attachment at index 2 will be the final output.
-                int displayAttachmentIndex = frameIndex == 0 ? 2 : 1;
-                VkDescriptorImageInfo displayImageInfo = fbo.GetDescriptorImageInfoForAttachment(displayAttachmentIndex,
-                                                                                                 m_FramebufferColorSampler);
-                VulkanDescriptorWriter(*m_CompositeDescriptorSetLayout, *m_DescriptorPool)
-                        .WriteImage(0, &displayImageInfo)
-                        .Build(m_CompositionDescriptorSets[i][frameIndex]);
-
-                RecordCompositionPass(
-                        cmdBuffer,
-                        globalSet,
-                        m_CompositionDescriptorSets[i][frameIndex],
-                        swapchainFbo);
-            }
-        }
+        RecordFrame(i, m_GlobalDescriptorSets[i]);
     }
 }
 
@@ -149,11 +216,10 @@ void RTRenderer::RecordMainRTPass(
 
 void RTRenderer::RecordAccumulationPass(
         VkCommandBuffer cmdBuffer,
-        VulkanGraphicsPipeline &pipeline,
         VkDescriptorSet globalSet,
         VkDescriptorSet accumulationSet)
 {
-    pipeline.Bind(cmdBuffer);
+    m_AccumulationPipeline->Bind(cmdBuffer);
 
     vkCmdBindDescriptorSets(
             cmdBuffer,
@@ -178,45 +244,11 @@ void RTRenderer::RecordAccumulationPass(
     vkCmdDraw(cmdBuffer, 3, 1, 0, 0);
 }
 
-
 void RTRenderer::RecordCompositionPass(
         VkCommandBuffer cmdBuffer,
-        VkDescriptorSet globalSet,
         VkDescriptorSet compositionSet,
-        VkFramebuffer swapchainFbo)
+        VulkanFramebuffer& fbo)
 {
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK_RESULT(vkBeginCommandBuffer(cmdBuffer, &beginInfo));
-
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = m_Swapchain->GetRenderPass();
-    renderPassInfo.framebuffer = swapchainFbo;
-
-    renderPassInfo.renderArea.offset = {0, 0};
-    renderPassInfo.renderArea.extent = m_Swapchain->GetSwapchainExtent();
-
-    std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {0.01f, 0.01f, 0.01f, 1.0f};
-    clearValues[1].depthStencil = {1.0f, 0};
-    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-    renderPassInfo.pClearValues = clearValues.data();
-
-    vkCmdBeginRenderPass(cmdBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(m_Swapchain->GetSwapchainExtent().width);
-    viewport.height = static_cast<float>(m_Swapchain->GetSwapchainExtent().height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    VkRect2D scissor{{0, 0}, m_Swapchain->GetSwapchainExtent()};
-    vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
-    vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
-
     m_CompositionGraphicsPipeline->Bind(cmdBuffer);
 
     vkCmdBindDescriptorSets(
@@ -225,16 +257,6 @@ void RTRenderer::RecordCompositionPass(
             m_CompositionGraphicsPipelineLayout,
             0,
             1,
-            &globalSet,
-            0,
-            nullptr);
-
-    vkCmdBindDescriptorSets(
-            cmdBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_CompositionGraphicsPipelineLayout,
-            1,
-            1,
             &compositionSet,
             0,
             nullptr);
@@ -242,7 +264,7 @@ void RTRenderer::RecordCompositionPass(
     vkCmdDraw(cmdBuffer, 3, 1, 0, 0);
 }
 
-void RTRenderer::Render(Camera& cameraRef)
+void RTRenderer::Draw(Camera& cameraRef)
 {
     GlobalUbo ubo{};
     ubo.Projection = cameraRef.GetProjection();
@@ -260,13 +282,8 @@ void RTRenderer::Render(Camera& cameraRef)
     m_GlobalUBOs[m_CurrentFrameIndex]->WriteToBuffer(&ubo);
     m_GlobalUBOs[m_CurrentFrameIndex]->Flush();
 
-    VkCommandBuffer cmdBuffer = m_DrawCommandBuffers[m_CurrentFrameIndex][m_AccumulationIndex];
-
     //Acquisition
     {
-        vkWaitForFences(m_DeviceRef.GetDevice(), 1, &m_WaitFences[m_CurrentFrameIndex], VK_TRUE,
-                        std::numeric_limits<uint64_t>::max());
-
         auto result = m_Swapchain->AcquireNextImage(&m_CurrentFrameIndex, m_PresentCompleteSemaphores[m_CurrentFrameIndex]);
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR)
@@ -276,6 +293,8 @@ void RTRenderer::Render(Camera& cameraRef)
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
             throw std::runtime_error("Failed to acquire swap chain image!");
     }
+
+    VkCommandBuffer cmdBuffer = m_DrawCommandBuffers[m_CurrentFrameIndex];
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -294,6 +313,7 @@ void RTRenderer::Render(Camera& cameraRef)
         {
             m_WindowRef.ResetWindowResizedFlag();
             RecreateSwapchain();
+            OnSwapchainResized(m_Swapchain->GetWidth(), m_Swapchain->GetHeight());
         }
         else if (result != VK_SUCCESS)
         {
@@ -315,7 +335,7 @@ void RTRenderer::AllocateCommandBuffers()
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandBufferCount = m_DrawCommandBuffers.size();
         allocInfo.commandPool = m_DeviceRef.GetGraphicsCommandPool();
-        vkAllocateCommandBuffers(m_DeviceRef.GetDevice(), &allocInfo, m_DrawCommandBuffers[i].data());
+        vkAllocateCommandBuffers(m_DeviceRef.GetDevice(), &allocInfo, m_DrawCommandBuffers.data());
     }
 }
 
@@ -330,10 +350,11 @@ void RTRenderer::SetupGlobalDescriptors()
             .Build();
 
     m_DescriptorPool = VulkanDescriptorPool::Builder(m_DeviceRef)
-            .SetMaxSets(VulkanSwapchain::MAX_FRAMES_IN_FLIGHT)
-            .AddPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VulkanSwapchain::MAX_FRAMES_IN_FLIGHT * 2)
-            .AddPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VulkanSwapchain::MAX_FRAMES_IN_FLIGHT * 2)
-            .AddPoolSize(VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, VulkanSwapchain::MAX_FRAMES_IN_FLIGHT * 2)
+            .SetMaxSets(8)
+            .AddPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VulkanSwapchain::MAX_FRAMES_IN_FLIGHT * 10)
+            .AddPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VulkanSwapchain::MAX_FRAMES_IN_FLIGHT * 10)
+            .AddPoolSize(VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, VulkanSwapchain::MAX_FRAMES_IN_FLIGHT * 10)
+            .AddPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VulkanSwapchain::MAX_FRAMES_IN_FLIGHT * 10)
             .Build();
 
     m_GlobalUBOs.resize(VulkanSwapchain::MAX_FRAMES_IN_FLIGHT);
@@ -358,108 +379,122 @@ void RTRenderer::SetupGlobalDescriptors()
     }
 }
 
+std::unique_ptr<VulkanFramebuffer> CreateFramebuffer(int frameIndex, VulkanDevice& device, VulkanSwapchain& swapchain)
+{
+    VulkanFramebuffer::Attachment::Specification attachment0 =
+        {
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT
+        };
+    VulkanFramebuffer::Attachment::Specification attachment1 =
+        {
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT
+        };
+    VulkanFramebuffer::Attachment::Specification attachment2 =
+        {
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT
+        };
+    VulkanFramebuffer::Attachment::Specification swapchainImageAttachment =
+        {
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT
+        };
+
+    std::vector<VulkanFramebuffer::Attachment::Specification> attachmentSpecs =
+        {
+            attachment0,                // Attachment A
+            attachment1,                // Attachment B
+            attachment2,                // Attachment C
+            swapchainImageAttachment    // Swapchain Image Attachment
+        };
+
+    // Define subpasses
+    std::vector<VulkanFramebuffer::Subpass> subpasses;
+
+    VulkanFramebuffer::Subpass rayTraceSubpass = {};
+    rayTraceSubpass.DepthStencilAttachment.attachment = VK_ATTACHMENT_UNUSED;
+    rayTraceSubpass.BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    rayTraceSubpass.ColorAttachments =
+    {
+        {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}
+    };
+    subpasses.push_back(rayTraceSubpass);
+
+    VulkanFramebuffer::Subpass accumPass = {};
+    accumPass.DepthStencilAttachment.attachment = VK_ATTACHMENT_UNUSED;
+    accumPass.BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+
+    // If it's an even pass, we read from attachment 1 from the previous frame's framebuffer.
+    // If it's an odd pass, we read from attachment 2 from the previous frame's framebuffer.
+    // However, regardless of parity, we read from attachment 0 from the current frame's framebuffer.
+    uint32_t readAttachmentIndex = frameIndex % 2 == 0 ? 1 : 2;
+    accumPass.InputAttachments =
+    {
+        { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+        { readAttachmentIndex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL }
+    };
+
+    // If it's an even pass, we write to attachment 2 of the current frame's framebuffer.
+    // If it's an odd pass, we write to attachment 1 from the current frame's framebuffer.
+    uint32_t writeAttachmentIndex = frameIndex % 2 == 0 ? 2 : 1;
+    accumPass.ColorAttachments =
+    {
+        {writeAttachmentIndex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+    };
+    subpasses.push_back(accumPass);
+
+    VulkanFramebuffer::Subpass finalPass = {};
+    accumPass.DepthStencilAttachment.attachment = swapchain.GetImageView();
+    accumPass.BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    // Writes to swapchain image
+    accumPass.ColorAttachments =
+    {
+        {3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+    };
+    subpasses.push_back(accumPass);
+
+    // Define dependencies
+    std::vector<VulkanFramebuffer::SubpassDependency> dependencies =
+    {
+        {
+            VK_SUBPASS_EXTERNAL,
+            0,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            0,
+            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_DEPENDENCY_BY_REGION_BIT
+        },
+        {
+            0,
+            1,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_DEPENDENCY_BY_REGION_BIT
+        },
+    };
+
+    return std::make_unique<VulkanFramebuffer>(
+            device,
+            swapchain.GetWidth(), swapchain.GetHeight(),
+            attachmentSpecs,
+            subpasses,
+            dependencies);
+}
+
 void RTRenderer::CreateFramebuffers()
 {
-    m_Framebuffers.resize(VulkanSwapchain::MAX_FRAMES_IN_FLIGHT);
-    for (auto &framebuffer: m_Framebuffers)
+    m_PerFrameFramebufferMap.resize(VulkanSwapchain::MAX_FRAMES_IN_FLIGHT);
+    for(int i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; ++i)
     {
-        VulkanFramebuffer::Attachment::Specification attachment0 =
-                {
-                        VK_FORMAT_R8G8B8A8_UNORM,
-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-                };
-
-        VulkanFramebuffer::Attachment::Specification attachment1 =
-                {
-                        VK_FORMAT_R8G8B8A8_UNORM,
-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-                };
-
-        VulkanFramebuffer::Attachment::Specification attachment2 =
-                {
-                        VK_FORMAT_R8G8B8A8_UNORM,
-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-                };
-
-        std::vector<VulkanFramebuffer::Attachment::Specification> attachmentSpecs =
-                {
-                        attachment0,
-                        attachment1,
-                        attachment2
-                };
-
-        // Define subpasses
-        std::vector<VulkanFramebuffer::Subpass> subpasses;
-
-        VulkanFramebuffer::Subpass rayTraceSubpass = {};
-        rayTraceSubpass.BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        rayTraceSubpass.ColorAttachments =
-        {
-            {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}
-        };
-        subpasses.push_back(rayTraceSubpass);
-
-        VulkanFramebuffer::Subpass accumPassB = {};
-        accumPassB.BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        // Even frame subpasses - writes to Attachment B (1).
-        accumPassB.ColorAttachments =
-        {
-            {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-        };
-        subpasses.push_back(accumPassB);
-
-        VulkanFramebuffer::Subpass accumPassC = {};
-        accumPassC.BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        // Odd frame subpasses - writes to Attachment C (2).
-        accumPassC.ColorAttachments =
-        {
-            {2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-        };
-        subpasses.push_back(accumPassC);
-
-        // Define dependencies
-        std::vector<VulkanFramebuffer::SubpassDependency> dependencies =
-        {
-            {
-                    VK_SUBPASS_EXTERNAL,
-                    0,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    0,
-                    VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    VK_DEPENDENCY_BY_REGION_BIT
-            },
-            // From subpass 0 to 1
-            {
-                    0,
-                    1,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    VK_DEPENDENCY_BY_REGION_BIT
-            },
-            // From subpass 0 to 2
-            {
-                    0,
-                    1,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    VK_DEPENDENCY_BY_REGION_BIT
-            }
-        };
-
-        uint32_t swapChainWidth = m_Swapchain->GetWidth();
-        uint32_t swapChainHeight = m_Swapchain->GetHeight();
-
-        framebuffer = std::make_unique<VulkanFramebuffer>(
-                m_DeviceRef,
-                swapChainWidth, swapChainHeight,
-                attachmentSpecs,
-                subpasses,
-                dependencies);
+        std::array<std::unique_ptr<VulkanFramebuffer>, 2> fbos;
+        fbos[0] = std::move(CreateFramebuffer(m_DeviceRef, *m_Swapchain));
+        fbos[1] = std::move(CreateFramebuffer(m_DeviceRef, *m_Swapchain));
+        m_PerFrameFramebufferMap[i] = std::move(fbos);
     }
 
     VkSamplerCreateInfo samplerCreateInfo = {};
@@ -482,7 +517,7 @@ void RTRenderer::SetupMainRayTracePass()
 {
     // Layout
     m_MainRTPassDescriptorSetLayout = VulkanDescriptorSetLayout::Builder(m_DeviceRef)
-            // Binding 0: SSBO for Spheres
+            // Binding 0: SS BO for Spheres
             .AddBinding(
                     0,
                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -506,8 +541,8 @@ void RTRenderer::SetupMainRayTracePass()
     VulkanGraphicsPipeline::PipelineConfigInfo pipelineConfig{};
     VulkanGraphicsPipeline::GetDefaultPipelineConfigInfo(pipelineConfig);
 
-    pipelineConfig.RenderPass = m_Framebuffers[0]->GetRenderPass();
-    pipelineConfig.PipelineLayout = m_CompositionGraphicsPipelineLayout;
+    pipelineConfig.RenderPass = m_PerFrameFramebufferMap[0][0]->GetRenderPass();
+    pipelineConfig.PipelineLayout = m_MainRTPassGraphicsPipelineLayout;
     pipelineConfig.EmptyVertexInputState = true;
     pipelineConfig.Subpass = 0;
 
@@ -542,14 +577,19 @@ void RTRenderer::SetupAccumulationPass()
 {
     // Layout
     m_AccumulationDescriptorSetLayout = VulkanDescriptorSetLayout::Builder(m_DeviceRef)
-            // Binding 0: Input Attachment - Attachment B or C depending on the frame #
+            // Binding 0: Global UBO
             .AddBinding(
                     0,
-                    VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                     VK_SHADER_STAGE_FRAGMENT_BIT)
             // Binding 1: Input Attachment - Attachment B or C depending on the frame #
             .AddBinding(
                     1,
+                    VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                    VK_SHADER_STAGE_FRAGMENT_BIT)
+            // Binding 2: Input Attachment - Attachment B or C depending on the frame #
+            .AddBinding(
+                    2,
                     VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
                     VK_SHADER_STAGE_FRAGMENT_BIT)
             .Build();
@@ -569,57 +609,77 @@ void RTRenderer::SetupAccumulationPass()
             m_DeviceRef.GetDevice(),
             &pipelineLayoutInfo,
             nullptr,
-
             &m_AccumulationGraphicsPipelineLayout));
 
-    int subpassIndex = 1;
-    for(auto& accumPipeline : m_AccumulationPipelines)
+    VulkanGraphicsPipeline::PipelineConfigInfo pipelineConfig{};
+    VulkanGraphicsPipeline::GetDefaultPipelineConfigInfo(pipelineConfig);
+
+    pipelineConfig.RenderPass = m_PerFrameFramebufferMap[0][0]->GetRenderPass();
+    pipelineConfig.PipelineLayout = m_AccumulationGraphicsPipelineLayout;
+    pipelineConfig.EmptyVertexInputState = true;
+    pipelineConfig.Subpass = 1;
+
+    VkPipelineColorBlendAttachmentState pipelineColorBlendAttachmentState;
+    pipelineColorBlendAttachmentState.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT |
+            VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT |
+            VK_COLOR_COMPONENT_A_BIT;
+    pipelineColorBlendAttachmentState.blendEnable = VK_FALSE;
+
+    pipelineConfig.ColorBlendInfo.attachmentCount = 1;
+    pipelineConfig.ColorBlendInfo.pAttachments = &pipelineColorBlendAttachmentState;
+
+    m_AccumulationPipeline = std::make_unique<VulkanGraphicsPipeline>(
+            m_DeviceRef,
+            "../assets/shaders/fsq.vert.spv",
+            "../assets/shaders/accumulation.frag.spv",
+            pipelineConfig);
+}
+
+void RTRenderer::SetupCompositionPass()
+{
+    m_CompositeDescriptorSetLayout =
+            VulkanDescriptorSetLayout::Builder(m_DeviceRef)
+                    // Binding 0: FBO Attachment Color Sampler from Accumulation Pass
+                    .AddBinding(
+                            0,
+                            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            VK_SHADER_STAGE_FRAGMENT_BIT)
+                    .Build();
+
+    const std::vector<VkDescriptorSetLayout> descriptorSetLayouts
     {
-        VulkanGraphicsPipeline::PipelineConfigInfo pipelineConfig{};
-        VulkanGraphicsPipeline::GetDefaultPipelineConfigInfo(pipelineConfig);
+        m_CompositeDescriptorSetLayout->GetDescriptorSetLayout()
+    };
 
-        pipelineConfig.RenderPass = m_Framebuffers[0]->GetRenderPass();
-        pipelineConfig.PipelineLayout = m_AccumulationGraphicsPipelineLayout;
-        pipelineConfig.EmptyVertexInputState = true;
-        pipelineConfig.Subpass = subpassIndex++;
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size());
+    pipelineLayoutInfo.pSetLayouts = descriptorSetLayouts.data();
 
-        VkPipelineColorBlendAttachmentState pipelineColorBlendAttachmentState;
-        pipelineColorBlendAttachmentState.colorWriteMask =
-                VK_COLOR_COMPONENT_R_BIT |
-                VK_COLOR_COMPONENT_G_BIT |
-                VK_COLOR_COMPONENT_B_BIT |
-                VK_COLOR_COMPONENT_A_BIT;
-        pipelineColorBlendAttachmentState.blendEnable = VK_FALSE;
+    VK_CHECK_RESULT(vkCreatePipelineLayout(
+            m_DeviceRef.GetDevice(),
+            &pipelineLayoutInfo,
+            nullptr,
+            &m_CompositionGraphicsPipelineLayout));
 
-        pipelineConfig.ColorBlendInfo.attachmentCount = 1;
-        pipelineConfig.ColorBlendInfo.pAttachments = &pipelineColorBlendAttachmentState;
+    VulkanGraphicsPipeline::PipelineConfigInfo pipelineConfig{};
+    VulkanGraphicsPipeline::GetDefaultPipelineConfigInfo(pipelineConfig);
 
-        accumPipeline = std::make_unique<VulkanGraphicsPipeline>(
-                m_DeviceRef,
-                "../assets/shaders/fsq.vert.spv",
-                "../assets/shaders/accumulation.frag.spv",
-                pipelineConfig);
-    }
-
-    m_AccumulationDescriptorSets.resize(VulkanSwapchain::MAX_FRAMES_IN_FLIGHT);
-    for (int i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; ++i)
-    {
-        for (auto &accumDescriptorSet: m_AccumulationDescriptorSets[i])
-        {
-            // Even frames take attachment 1, odd frames take attachment 2.
-            int attachmentIndex = i == 0 ? 1 : 2;
-            VkDescriptorImageInfo info = m_Framebuffers[i]->GetDescriptorImageInfoForAttachment(attachmentIndex,
-                                                                                                m_FramebufferColorSampler);
-            VulkanDescriptorWriter(*m_AccumulationDescriptorSetLayout, *m_DescriptorPool)
-                    .WriteImage(0, &info)
-                    .Build(accumDescriptorSet);
-        }
-    }
+    pipelineConfig.RenderPass = m_Swapchain->GetRenderPass();
+    pipelineConfig.PipelineLayout = m_CompositionGraphicsPipelineLayout;
+    pipelineConfig.EmptyVertexInputState = true;
+    m_CompositionGraphicsPipeline = std::make_unique<VulkanGraphicsPipeline>(
+            m_DeviceRef,
+            "../assets/shaders/fsq.vert.spv",
+            "../assets/shaders/texture_display.frag.spv",
+            pipelineConfig);
 }
 
 void RTRenderer::CreateSynchronizationPrimitives()
 {
-    // Presentation/Render Sync Primitives
+    // Presentation/Draw Sync Primitives
     {
         m_PresentCompleteSemaphores.resize(VulkanSwapchain::MAX_FRAMES_IN_FLIGHT);
         m_RenderCompleteSemaphores.resize(VulkanSwapchain::MAX_FRAMES_IN_FLIGHT);
@@ -635,11 +695,10 @@ void RTRenderer::CreateSynchronizationPrimitives()
 
         for (size_t i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; i++)
         {
-            VK_CHECK_RESULT(vkCreateSemaphore(m_DeviceRef.GetDevice(), &semaphoreInfo, nullptr,
-                                              &m_PresentCompleteSemaphores[i]));
-            VK_CHECK_RESULT(vkCreateSemaphore(m_DeviceRef.GetDevice(), &semaphoreInfo, nullptr,
-                                              &m_RenderCompleteSemaphores[i]));
+            VK_CHECK_RESULT(vkCreateSemaphore(m_DeviceRef.GetDevice(), &semaphoreInfo, nullptr, &m_PresentCompleteSemaphores[i]));
+            VK_CHECK_RESULT(vkCreateSemaphore(m_DeviceRef.GetDevice(), &semaphoreInfo, nullptr,&m_RenderCompleteSemaphores[i]));
             VK_CHECK_RESULT(vkCreateFence(m_DeviceRef.GetDevice(), &fenceInfo, nullptr, &m_WaitFences[i]));
+
             std::stringstream semaphoreNameStream;
             semaphoreNameStream << "PresentComplete" << i;
             SetDebugUtilsObjectName(m_DeviceRef.GetDevice(), VK_OBJECT_TYPE_SEMAPHORE,
@@ -685,6 +744,9 @@ void RTRenderer::RecreateSwapchain()
 
 void RTRenderer::OnSwapchainResized(uint32_t width, uint32_t height)
 {
-    for (auto &framebuffer: m_Framebuffers)
-        framebuffer->Resize(width, height);
+    for(int i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; ++i)
+    {
+        for (auto &framebuffer: m_PerFrameFramebufferMap[i])
+            framebuffer->Resize(width, height);
+    }
 }

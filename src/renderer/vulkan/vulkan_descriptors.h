@@ -63,7 +63,7 @@ public:
     };
 
     VulkanDescriptorPool(
-        VulkanDevice& m_Device,
+        VulkanDevice& device,
         uint32_t m_MaxSets,
         VkDescriptorPoolCreateFlags m_PoolFlags,
         const std::vector<VkDescriptorPoolSize>& m_PoolSizes);

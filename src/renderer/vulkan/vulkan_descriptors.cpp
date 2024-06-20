@@ -88,11 +88,11 @@ std::unique_ptr<VulkanDescriptorPool> VulkanDescriptorPool::Builder::Build() con
 // *************** Descriptor Pool *********************
 
 VulkanDescriptorPool::VulkanDescriptorPool(
-    VulkanDevice& lveDevice,
+    VulkanDevice& device,
     uint32_t maxSets,
     VkDescriptorPoolCreateFlags poolFlags,
     const std::vector<VkDescriptorPoolSize>& poolSizes)
-        : m_Device{lveDevice}
+        : m_Device{device}
 {
     VkDescriptorPoolCreateInfo descriptorPoolInfo{};
     descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;

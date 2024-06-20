@@ -8,6 +8,7 @@
 #include "renderer/camera.h"
 #include <memory>
 #include <vector>
+#include <array>
 #include <vulkan/vulkan.h>
 
 class RTRenderer
@@ -17,11 +18,13 @@ public:
     ~RTRenderer();
 
     void Initialize();
-    void Render(Camera &cameraRef);
+    void Draw(Camera &cameraRef);
 
     float GetAspectRatio() const { return m_Swapchain->GetExtentAspectRatio(); }
 
 private:
+
+    void RecordFrame(int swapImageIndex, VkDescriptorSet globalSet);
 
     void RecordMainRTPass(
             VkCommandBuffer cmdBuffer,
@@ -30,16 +33,15 @@ private:
 
     void RecordAccumulationPass(
             VkCommandBuffer cmdBuffer,
-            VulkanGraphicsPipeline &pipeline,
             VkDescriptorSet globalSet,
             VkDescriptorSet accumulationSet);
 
     void RecordCompositionPass(
             VkCommandBuffer cmdBuffer,
-            VkDescriptorSet globalSet,
             VkDescriptorSet compositionSet,
-            VkFramebuffer swapchainFbo);
+            VulkanFramebuffer& fbo);
 
+    void CreateSphereBuffers();
     void CreateFramebuffers();
     void AllocateCommandBuffers();
     void SetupGlobalDescriptors();
@@ -47,6 +49,7 @@ private:
 
     void SetupMainRayTracePass();
     void SetupAccumulationPass();
+    void SetupCompositionPass();
 
     void RecreateSwapchain();
     void OnSwapchainResized(uint32_t width, uint32_t height);
@@ -57,10 +60,10 @@ private:
     VulkanDevice& m_DeviceRef;
     std::unique_ptr<VulkanSwapchain> m_Swapchain;
 
-    std::vector<std::array<VkCommandBuffer, 2>> m_DrawCommandBuffers;
-
+    std::vector<VkCommandBuffer> m_DrawCommandBuffers;
     std::unique_ptr<VulkanDescriptorPool> m_DescriptorPool;
-    std::vector<std::unique_ptr<VulkanFramebuffer>> m_Framebuffers;
+
+    std::vector<std::array<std::unique_ptr<VulkanFramebuffer>, 2>> m_PerFrameFramebufferMap;
     VkSampler m_FramebufferColorSampler;
 
     // UBOs
@@ -76,8 +79,6 @@ private:
     std::unique_ptr<VulkanDescriptorSetLayout> m_GlobalSetLayout;
 
     // Descriptor Sets
-    std::vector<std::array<VkDescriptorSet, 2>> m_CompositionDescriptorSets;
-    std::vector<std::array<VkDescriptorSet, 2>> m_AccumulationDescriptorSets;
     std::vector<VkDescriptorSet> m_MainRTPassDescriptorSets;
     std::vector<VkDescriptorSet> m_GlobalDescriptorSets;
 
@@ -89,7 +90,7 @@ private:
     // Pipelines
     std::unique_ptr<VulkanGraphicsPipeline> m_CompositionGraphicsPipeline;
     std::unique_ptr<VulkanGraphicsPipeline> m_MainRTPassGraphicsPipeline;
-    std::array<std::unique_ptr<VulkanGraphicsPipeline>, 2> m_AccumulationPipelines;
+    std::unique_ptr<VulkanGraphicsPipeline> m_AccumulationPipeline;
 
     std::vector<VkSemaphore> m_PresentCompleteSemaphores;   // Swap chain image presentation
     std::vector<VkSemaphore> m_RenderCompleteSemaphores;    // Command buffer submission and execution
