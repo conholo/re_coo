@@ -64,9 +64,6 @@ private:
     uint32_t m_CurrentFrameIndex = 0;
     uint64_t m_FrameCounter = 0;
 
-    std::vector<std::array<VkDescriptorSet, 2>> m_CompositionDescriptorSets;
-    std::vector<VkDescriptorSet> m_MainRTPassDescriptorSets;
-
     // Buffers
     std::vector<std::unique_ptr<VulkanBuffer>> m_SphereSSBOs;
 
@@ -93,9 +90,9 @@ private:
     std::unique_ptr<VulkanDescriptorSetLayout> m_GlobalSetLayout;
 
     // Descriptor Sets
-    std::vector<VkDescriptorSet> m_GlobalDescriptorSets;
-    std::vector<VkDescriptorSet> m_OffscreenDescriptorSets;
+    std::vector<std::array<VkDescriptorSet, 2>> m_CompositionDescriptorSets;
     std::vector<std::array<VkDescriptorSet, 2>> m_AccumulationDescriptorSets;
+    std::vector<VkDescriptorSet> m_MainRTPassDescriptorSets;
 
     // Pipeline Layouts
     VkPipelineLayout m_MainRTPassGraphicsPipelineLayout{};

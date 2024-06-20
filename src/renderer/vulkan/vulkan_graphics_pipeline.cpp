@@ -5,7 +5,6 @@
 #include <fstream>
 #include <cassert>
 #include <iostream>
-#include <fileapi.h>
 
 
 VulkanGraphicsPipeline::VulkanGraphicsPipeline(VulkanDevice& deviceRef,
