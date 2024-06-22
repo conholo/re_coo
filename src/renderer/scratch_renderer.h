@@ -11,6 +11,24 @@
 #include <array>
 #include <vulkan/vulkan.h>
 
+
+// G-Buffer framebuffer attachments
+struct FrameBufferAttachment
+{
+    VkImage Image = VK_NULL_HANDLE;
+    VkDeviceMemory Mem = VK_NULL_HANDLE;
+    VkImageView View = VK_NULL_HANDLE;
+    VkFormat Format{};
+};
+
+struct Attachments
+{
+    FrameBufferAttachment A, B, C;
+    int32_t Width{};
+    int32_t Height{};
+};
+
+
 class RTRenderer
 {
 public:
@@ -54,6 +72,11 @@ private:
     void RecreateSwapchain();
     void OnSwapchainResized(uint32_t width, uint32_t height);
 
+    void CreateAttachments();
+    void ClearAttachment(FrameBufferAttachment* attachment);
+    void CreateAttachment(VkFormat format, VkImageUsageFlags usage, FrameBufferAttachment* attachment);
+    void SetupRenderPass();
+    void SetupFrameBuffer();
 
 private:
     Window& m_WindowRef;
@@ -103,4 +126,6 @@ private:
     uint64_t m_FrameCounter = 0;
     uint32_t m_CurrentFrameIndex = 0;
     uint8_t m_AccumulationIndex = 0;
+
+    Attachments m_Attachments;
 };

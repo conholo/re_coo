@@ -19,10 +19,16 @@ public:
     VkFramebuffer GetFrameBuffer(uint32_t index) { return m_SwapchainFramebuffers[index]; }
     VkRenderPass GetRenderPass() { return m_RenderPass; }
 
-    VkImageView GetImageView(int index) { return m_SwapchainImageViews[index]; }
-    size_t GetImageCount() { return m_SwapchainImages.size(); }
     VkFormat GetSwapchainImageFormat() { return m_SwapchainImageFormat; }
     VkFormat GetSwapchainDepthFormat() { return m_SwapchainDepthFormat; }
+
+    VkImageView GetImageView(int index) { return m_SwapchainImageViews[index]; }
+    VkImage GetImage(int index) { return m_SwapchainImages[index]; }
+    size_t GetImageCount() { return m_SwapchainImages.size(); }
+
+    VkImageView GetDepthImageView(int index) { return m_DepthImageViews[index]; }
+    VkImage GetDepthImage(int index) { return m_DepthImages[index]; }
+    VkDeviceMemory GetDepthImageMemory(int index) { return m_DepthImageMemories[index]; }
 
     VkExtent2D GetSwapchainExtent() { return m_SwapchainExtent; }
     [[nodiscard]] uint32_t GetWidth() const { return m_SwapchainExtent.width; }
@@ -69,6 +75,7 @@ private:
     std::vector<VkImage> m_DepthImages;
     std::vector<VkDeviceMemory> m_DepthImageMemories;
     std::vector<VkImageView> m_DepthImageViews;
+
     std::vector<VkImage> m_SwapchainImages;
     std::vector<VkImageView> m_SwapchainImageViews;
 

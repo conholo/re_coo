@@ -48,7 +48,8 @@ void PrintAttachment(VulkanFramebuffer::Attachment& attachment)
 void VulkanFramebuffer::CreateAttachment(
     VulkanDevice& deviceRef,
     const Attachment::Specification& spec,
-    Attachment* attachment) const
+    Attachment* attachment,
+    uint32_t width, uint32_t height)
 {
     VkImageAspectFlags aspectMask = 0;
 
@@ -66,12 +67,14 @@ void VulkanFramebuffer::CreateAttachment(
     assert(aspectMask > 0);
 
     attachment->Spec = spec;
+    attachment->Width = width;
+    attachment->Height = height;
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
     imageCreateInfo.format = spec.Format;
-    imageCreateInfo.extent.width = m_Width;
-    imageCreateInfo.extent.height = m_Height;
+    imageCreateInfo.extent.width = width;
+    imageCreateInfo.extent.height = height;
     imageCreateInfo.extent.depth = 1;
     imageCreateInfo.mipLevels = 1;
     imageCreateInfo.arrayLayers = 1;
@@ -212,7 +215,7 @@ void VulkanFramebuffer::Resize(uint32_t width, uint32_t height)
 
     // Recreate attachments with new size
     for (auto& attachment : m_Attachments)
-        CreateAttachment(m_DeviceRef, attachment.Spec, &attachment);
+        CreateAttachment(m_DeviceRef, attachment.Spec, &attachment, width, height);
 
     CreateFramebuffer();
 }

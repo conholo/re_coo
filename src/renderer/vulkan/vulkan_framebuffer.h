@@ -15,6 +15,7 @@ public:
             VkImageUsageFlags Usage;
         };
 
+        uint32_t Width, Height;
         VkImage Image;
         VkDeviceMemory Mem;
         VkImageView View;
@@ -48,10 +49,11 @@ public:
             const std::vector<SubpassDependency>& dependencies);
     ~VulkanFramebuffer();
 
-    void CreateAttachment(
-        VulkanDevice& deviceRef,
-        const Attachment::Specification& spec,
-        Attachment* attachment) const;
+    static void CreateAttachment(
+            VulkanDevice& deviceRef,
+            const Attachment::Specification& spec,
+            Attachment* attachment,
+            uint32_t width, uint32_t height);
 
     void Resize(uint32_t width, uint32_t height);
 
