@@ -7,8 +7,9 @@ VulkanFramebuffer::VulkanFramebuffer(
         uint32_t width, uint32_t height,
         const std::vector<Attachment::Specification>& attachmentSpecs,
         const std::vector<Subpass>& subpasses,
-        const std::vector<SubpassDependency>& dependencies)
-        : m_DeviceRef(deviceRef), m_Width(width), m_Height(height), m_Subpasses(subpasses), m_Dependencies(dependencies)
+        const std::vector<SubpassDependency>& dependencies,
+        const std::vector<ExternalAttachment>& externalAttachments)
+        : m_DeviceRef(deviceRef), m_Width(width), m_Height(height), m_Subpasses(subpasses), m_Dependencies(dependencies), m_ExternalAttachments(externalAttachments)
 {
     m_Attachments.resize(attachmentSpecs.size());
     for (int i = 0; i < attachmentSpecs.size(); i++)
@@ -16,9 +17,9 @@ VulkanFramebuffer::VulkanFramebuffer(
         CreateAttachment(
                 m_DeviceRef,
                 attachmentSpecs[i],
-                &m_Attachments[i]);
+                &m_Attachments[i],
+                m_Width, m_Height);
     }
-
     CreateFramebuffer();
 }
 
@@ -116,30 +117,40 @@ VkDescriptorImageInfo VulkanFramebuffer::GetDescriptorImageInfoForAttachment(uin
 
 void VulkanFramebuffer::CreateFramebuffer()
 {
-    std::vector<VkAttachmentDescription> attachmentDescs{m_Attachments.size()};
+    std::vector<VkAttachmentDescription> attachmentDescs(m_Attachments.size() + m_ExternalAttachments.size());
     std::vector<VkImageView> attachmentImageViews;
 
+    // Include internal attachments
     for (uint32_t i = 0; i < m_Attachments.size(); ++i)
     {
         attachmentDescs[i].samples = VK_SAMPLE_COUNT_1_BIT;
-        attachmentDescs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachmentDescs[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachmentDescs[i].loadOp = m_Attachments[i].Spec.LoadOp;
+        attachmentDescs[i].storeOp = m_Attachments[i].Spec.StoreOp;
         attachmentDescs[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachmentDescs[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachmentDescs[i].format = m_Attachments[i].Spec.Format;
-
-        if (m_Attachments[i].Spec.Usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
-        {
-            attachmentDescs[i].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            attachmentDescs[i].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        }
-        else
-        {
-            attachmentDescs[i].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            attachmentDescs[i].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        }
+        attachmentDescs[i].initialLayout = m_Attachments[i].Spec.InitialLayout;
+        attachmentDescs[i].finalLayout = m_Attachments[i].Spec.FinalLayout;
 
         attachmentImageViews.push_back(m_Attachments[i].View);
+    }
+
+    // Include external images (e.g., swap chain images)
+    for (size_t i = 0; i < m_ExternalAttachments.size(); ++i)
+    {
+        VkAttachmentDescription extAttachmentDesc{};
+        extAttachmentDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+        extAttachmentDesc.loadOp = m_ExternalAttachments[i].Spec.LoadOp;
+        extAttachmentDesc.storeOp = m_ExternalAttachments[i].Spec.StoreOp;
+        extAttachmentDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        extAttachmentDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+        extAttachmentDesc.format = m_ExternalAttachments[i].Spec.Format;
+        extAttachmentDesc.initialLayout = m_ExternalAttachments[i].Spec.InitialLayout;
+        extAttachmentDesc.finalLayout = m_ExternalAttachments[i].Spec.FinalLayout;
+
+        attachmentDescs[m_Attachments.size() + i] = extAttachmentDesc;
+        attachmentImageViews.push_back(m_ExternalAttachments[i].View);
     }
 
     std::vector<VkSubpassDescription> subpassDescs(m_Subpasses.size());
@@ -151,9 +162,9 @@ void VulkanFramebuffer::CreateFramebuffer()
         subpassDescs[i].inputAttachmentCount = static_cast<uint32_t>(m_Subpasses[i].InputAttachments.size());
         subpassDescs[i].pInputAttachments = m_Subpasses[i].InputAttachments.data();
         subpassDescs[i].pDepthStencilAttachment = m_Subpasses[i].DepthStencilAttachment.attachment != VK_ATTACHMENT_UNUSED
-                    ? &m_Subpasses[i].DepthStencilAttachment
-                    : nullptr;
-        }
+                                                  ? &m_Subpasses[i].DepthStencilAttachment
+                                                  : nullptr;
+    }
 
     std::vector<VkSubpassDependency> dependencies(m_Dependencies.size());
     for (size_t i = 0; i < m_Dependencies.size(); ++i)
